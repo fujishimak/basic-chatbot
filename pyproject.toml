@@ -1,0 +1,28 @@
+[project]
+name = "basic-chatbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Joshua Thomas", email = "joshua.fujishima@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "langchain>=1.4.2",
+    "langchain-classic>=1.0.8",
+    "langchain-openai>=1.6.6",
+    "langgraph>=1.2.12",
+    "openlit>=1.45.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "python-dotenv>=1.2.3",
+    "reflex>=0.9.12",
+    "ruff>=0.16.9",
+]
+
+[project.scripts]
+basic-chatbot = "basic_chatbot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
