@@ -33,15 +33,17 @@ def qa(question: str, answer: str) -> rx.Component:
         )
 
 def chat() -> rx.Component:
-    return rx.box(
-        rx.foreach(State.chat_history, lambda messages: qa(messages[0], messages[1]))
+    return rx.auto_scroll(
+        rx.foreach(State.chat_history, lambda messages: qa(messages[0], messages[1])),
+        flex="1",
+        width="100%"
     )
 
 def action_bar() -> rx.Component:
     return rx.form(
         rx.hstack(
             rx.input(
-                id="question_input", # need this so we can refocus to this input after submission
+                id="question_input", # Need this so we can refocus to this input after submission
                 value=State.question, # Need this because we will clear from the State object, and if we didn't then the input would never reflect empty after submission
                 disabled=State.processing,
                 on_change=State.set_question,
@@ -53,7 +55,8 @@ def action_bar() -> rx.Component:
                 loading=State.processing, 
                 style=style.button_style,
                 ),
-            width="100%"
+            width="100%",
+            flex_shrink="0" # never shrink; keep natural height and pinned at bottom
         ),
         on_submit=State.answer,
         reset_on_submit=False

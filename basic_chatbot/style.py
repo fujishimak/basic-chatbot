@@ -69,6 +69,10 @@ button_style = dict(
 index_style = dict(
     width="100%",
     max_width="48em",
+    height="100dvh", # fill the entire height of the viewport (responsive on mobile as well)
+    margin="0 auto", # center horizontally
     padding="1em",
-    align="stretch",
+    display="flex", # move away from default block flow and control how space is used by children
+    flex_direction="column" # stacks children vertically
+    # align="stretch", flex handles width in this case
 )

@@ -1,3 +1,5 @@
+from charset_normalizer import detect
+import asyncio
 from asyncio.log import logger
 import time
 from datetime import datetime
@@ -79,12 +81,11 @@ class SearchResults(BaseModel):
 @tool(args_schema=SearchInput) 
 async def search_tool(query: str, max_results: int = 5) -> dict:
     """
-    Search the web for real-time information, news, current events, and facts.
-    Use this tool whenever the user asks a question requiring outside knowledge.
+    Use this tool whenever the user asks a question requiring external or up-to-date knowledge, or if the user asks to search for something specific. If the user has not specified a number of results, default to 5.
     """
     # Make the call to the Tavily API. We do this async because we do not want to freeze the event loop while awaiting the call via client.post
-  
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    logger.info("Received user query | query=%r", query)
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(
             "https://api.tavily.com/search",
             headers={
@@ -100,7 +101,9 @@ async def search_tool(query: str, max_results: int = 5) -> dict:
     # Launch search and pass back max_results 
         response.raise_for_status()
     
+    logger.info("Received results")
     data = response.json()
+    logger.debug("JSON search payload: \n%s", pformat(data))
     parsed = SearchResults(
         query=query,
         answer=data.get("answer"),
@@ -123,24 +126,24 @@ class TopicClassifierOutput(BaseModel):
     """ Return a boolean representing whether or not the query is off-topic """
     approved: bool
 
-@tool(args_schema=TopicClassifierInput)
-async def approve_query_topic(query: str, preferred_topic: str = "Python"):
+
+async def approve_query_topic(query: str, preferred_topic: str = "Python") -> TopicClassifierOutput:
     """
     Assess the user's query to verify if on-topic or not. 
     """
     classifier_template = ChatPromptTemplate.from_messages([
-            ("system","You are a fast classifier of topics given a user's query. Verify if the user's input query matches {preferred_topic}, and return YES or NO only."),
+            ("system","You are a fast classifier of topics given a user's query. Verify if the user's input query is related to {preferred_topic}, and return True or False only. Social banter and pleasantries are considered on topic."),
             ("human", "{user_input}")
         ])
 
-    classifier_llm = ChatOpenAI(
+    llm = ChatOpenAI(
         base_url=os.environ.get("SPUR_ENDPOINT"),
         api_key=os.environ.get("CLASSIFIER_API_KEY"),
         model="spur-chat-mini",
         temperature=0.0,
     )
 
-    topic = "Python"
+    topic = "The Python language and related resources"
     prompt = classifier_template.invoke(
             {
                 "user_input":query,
@@ -148,32 +151,40 @@ async def approve_query_topic(query: str, preferred_topic: str = "Python"):
                 },       
             )
 
+    classifier_llm = llm.with_structured_output(TopicClassifierOutput)
+    
     # Set up our parser
-    parser = BooleanOutputParser()
+    # parser = BooleanOutputParser()
 
     # Now we perform an async invoke of the parser and llm since this involves a network call
     # We can chain this and have a single awaitable pipeline rather than doing multiple awaits
+    logger.info("Verifying topic alignment | query=%s", query)
+    # chain = classifier_llm | parser
+    # retries = 0
 
-    chain = classifier_llm | parser
-    retries = 0
 
-    response = False
+
+    # Assume off-topic until proven otherwise 
+    response = await classifier_llm.ainvoke(prompt)
+    logger.info("Response to topic alignment check | %s", response)
     
-    # SLMs will sometimes ignore instructions so look out for a ValueError, we will retry
-    while retries < 3:
-        try:
-            response = await chain.ainvoke(prompt)
-            if isinstance(response, bool):
-                break
-        except Exception as e:
-            retries+=1
-            response = False # Fail closed
-            continue
+    # # SLMs will sometimes ignore instructions so look out for a ValueError, we will retry
+    # while retries < 3:
+    #     try:
+    #         response = await chain.ainvoke(prompt)
+    #         logger.info("Response to topic alignment check | %s", response)
+    #         if isinstance(response, bool):
+    #             break
+    #     except Exception as e:
+    #         logger.info("Error received: %s", e)
+    #         retries+=1
+    #         response = False # Fail closed
+    #         continue
 
-    # When we exit we expect response to be False at worst
-    parsed = TopicClassifierOutput(approved=response)
+    # # When we exit we expect response to be False at worst
+    # parsed = TopicClassifierOutput(approved=response)
 
-    return parsed.model_dump()
+    return TopicClassifierOutput.model_validate(response)
 
 
 ######## TOPIC CLASSIFIER TOOL END ########
@@ -185,8 +196,8 @@ class ContentCategoryOutput(BaseModel):
     contains_violence: bool = Field(description="Indicates if the user's query contains violence")
     toxicity_rating: Literal["NONE","LOW","MEDIUM","HIGH"] = Field(description="A four-scale rating of toxicity with NONE, LOW, MEDIUM, HIGH")
 
-@tool
-async def detect_toxicity(query: str) -> dict:
+
+async def detect_toxicity(query: str) -> ContentCategoryOutput:
     """
     Assess the user's query to verify if it contains hate speech or violence and rate the overall level of toxicity. 
     """
@@ -217,10 +228,11 @@ async def detect_toxicity(query: str) -> dict:
     # We use with_structured_output for this one because unlike topic detection  we need robustness to prose.
 
     structured_llm = content_llm.with_structured_output(ContentCategoryOutput)
-
+    logger.info("Running toxicity detection on user query | query=%s", query)
     response = await structured_llm.ainvoke(prompt)
+    logger.info("Response received | %s", pformat(response) ) 
 
-    return response
+    return ContentCategoryOutput.model_validate(response)
 
 ######## DATE TOOL END ########
 
@@ -247,7 +259,7 @@ class State(rx.State):
         
         # Ensure that our prompt template has a slot for historical messages
         prompt_template = ChatPromptTemplate.from_messages([
-            ("system","You introduce yourself as a helpful assistant who knows all about {topic}. You provide helpful details and references when asked. You also ask follow-up questions to better understand how to be useful. You use clear professional language, and are as succinct as possible. Before providing a response you always ensure that that the query topic is approved for discussion. if it is not, you politely decline, asking the use to stay on {topic}. Before providing a response you also try to detect toxicity in the user's query. If the toxicity rating is anything other than NONE, you decline to engage. Specifically, if the toxicity rating is HIGH, you tell the user `Please jump offa mi bumpah`, and refuse to engage until they apologise."),
+            ("system","You introduce yourself as a helpful assistant who knows all about {topic}. You provide helpful details and references when asked. You have access to a search tool for searching the web for real-time, current or up-to-date information to substantiate your answers and cite sources as evidence for your opinions where helpful. You also ask follow-up questions to better understand how to be useful. You use clear professional language, and are as succinct as possible."),
             MessagesPlaceholder("history"),
             ("human", "{user_input}")
         ])
@@ -256,7 +268,7 @@ class State(rx.State):
         history_messages = []
 
         # Set up tools
-        tools = [search_tool, approve_query_topic, detect_toxicity]
+        tools = [search_tool]
         tools_by_name = {t.name : t for t in tools}
 
         # Snapshotting: acquire a lock and perform any mutations necessary
@@ -296,7 +308,7 @@ class State(rx.State):
 
         # Build the prompt, we call invoke() to get a resolved string that has our variables filled in.
         # Use local variables so we can run lock-free
-        topic = "Python"
+        topic = "The Python language and related resources"
         prompt = prompt_template.invoke(
                 {
                     "user_input":question,
@@ -305,38 +317,73 @@ class State(rx.State):
                     },
                 
                 )
+
+        topic_verdict,toxic_verdict = await asyncio.gather(
+            approve_query_topic(question),
+            detect_toxicity(question)
+        )
+
+        if(topic_verdict.approved == False):
+            async with self:
+                self.chat_history[-1] = (self.chat_history[-1][0], f"Let's keep the topic to {topic}, shall we?")
+            yield rx.set_focus("question_input")
+            return
+
+        if(toxic_verdict.toxicity_rating in ("MEDIUM" , "HIGH")):
+            async with self:
+                self.chat_history[-1] = (self.chat_history[-1][0], "Sorry but I refuse to engage with your statement.")
+            yield rx.set_focus("question_input")
+            return
+
+        # if either of the guardrails above fire then the model is never called
         
+        # MAX_TURNS = 5
+
+        # for _ in range(MAX_TURNS):
+        logger.info("Invoking bot | prompt=%s" , prompt.to_string())
         ai_msg = await model_with_tools.ainvoke(prompt)
+        logger.info("Received AIMessage | %s", pformat(ai_msg.to_json()))
+
         messages = prompt.to_messages()
         messages.append(ai_msg) # Append the AI's latest message in context. Tool calls usually have tool_calls populated
 
+        # if not ai_msg.tool_calls:
+        #     logger.info("No further tool calls found, proceeding to streaming response.")
+        #     break 
+        
         if ai_msg.tool_calls:
-            
+            logger.info("Tools called | %s", ai_msg.tool_calls)
             # Find out what the model asked for, if anything
             for call in ai_msg.tool_calls:
                 tool = tools_by_name[call["name"]]
                 result = await tool.ainvoke(call["args"])
+                logger.info("%s tool called | result=%s", call["name"], result)
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
         # If we have no tool calls then ai_msg is already appended so we will write directly
 
         # At this point we can now stream the response back 
         async for chunk in model_with_tools.astream(messages):
             try:
+                logger.info("Fetching chunk")
                 text = content_to_text(chunk.content)
                 async with self:
                     self.chat_history[-1] = (self.chat_history[-1][0], self.chat_history[-1][1] + text)
+                    logger.info("Chunk added")
                 yield
             except APIError:
                 async with self:
+                    logger.info("APIError encountered!")
                     self.chat_history[-1] = (self.chat_history[-1][0],"The request failed, please try again")
                     self.error = "Request failed"
                 yield
             except Exception as e:
+                logger.info("Exception raised | %s", e)
                 continue # We found something that wasn't str or list, swallow the exception, skip the block and move on
         
         # If we succeeded here then we're done processing...mutate processing state safely
         async with self:
             self.processing = False
+            logger.info("Done processing, yielding control...")
         yield rx.set_focus("question_input") #refocus to the input box.
 
      
